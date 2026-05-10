@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>untangle some wires</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100vw; height: 100vh;
+      display: flex; flex-direction: column;
+      font-family: monospace;
+      background: #fff;
+      padding: 20px;
+    }
+    #header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }
+    #title { font-size: 14px; line-height: 1.6; }
+    #controls { display: flex; gap: 20px; align-items: center; font-size: 14px; }
+    button {
+      background: none; border: none; cursor: pointer;
+      text-decoration: underline; font-size: 14px; font-family: monospace;
+    }
+    #canvas-wrap {
+      flex: 1;
+      border: 1px solid #000;
+      border-radius: 4px;
+      background: #F9F9F9;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas { cursor: grab; max-width: 100%; max-height: 100%; }
+    #footer { text-align: center; margin-top: 20px; font-size: 12px; font-family: monospace; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <div id="title">untangle some wires</div>
+  <div id="controls">
+    <span id="timer">00:00:00</span>
+    <button id="pauseBtn">pause</button>
+    <button id="restartBtn">restart</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="footer">made by caroline sia because i have free will</div>
+
+<script>
+  // ── Seeded RNG ──
+  function makeRng(seed) {
+    let s = (seed + 1) * 1234567;
+    return () => {
+      s = (s * 1664525 + 1013904223) & 0xffffffff;
+      return (s >>> 0) / 0xffffffff;
+    };
+  }
+
+  // ── State ──
+  let seed = 0;
+  let gameTime = 0;
+  let gamePaused = false;
+  let isWon = false;
+  let timerInterval = null;
+  let animFrame = null;
+
+  const timerEl = document.getElementById('timer');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const footerEl = document.getElementById('footer');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  function formatTime(s) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  }
+
+  function startTimer() {
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+      if (!gamePaused) { gameTime++; timerEl.textContent = formatTime(gameTime); }
+    }, 1000);
+  }
+
+  pauseBtn.addEventListener('click', () => {
+    gamePaused = !gamePaused;
+    pauseBtn.textContent = gamePaused ? 'resume' : 'pause';
+  });
+
+  restartBtn.addEventListener('click', () => {
+    seed++;
+    gameTime = 0;
+    gamePaused = false;
+    isWon = false;
+    pauseBtn.textContent = 'pause';
+    timerEl.textContent = '00:00:00';
+    footerEl.textContent = 'made by caroline sia because i have free will';
+    initGame(seed);
+  });
+
+  // ── Game ──
+  function initGame(randomSeed) {
+    if (animFrame) cancelAnimationFrame(animFrame);
+    canvas.removeEventListener('mousedown', onDown);
+    canvas.removeEventListener('mousemove', onMove);
+    canvas.removeEventListener('mouseup', onUp);
+    canvas.removeEventListener('mouseleave', onUp);
+    canvas.removeEventListener('touchstart', onDown);
+    canvas.removeEventListener('touchmove', onMove);
+    canvas.removeEventListener('touchend', onUp);
+
+    const dpr = window.devicePixelRatio || 2;
+    const W = 800, H = 600;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+
+    const rng = makeRng(randomSeed);
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    class Point {
+      constructor(x, y) {
+        this.x = x; this.y = y; this.px = x; this.py = y; this.pinned = false;
+      }
+      update() {
+        if (this.pinned) return;
+        const vx = (this.x - this.px) * 0.5, vy = (this.y - this.py) * 0.5;
+        this.px = this.x; this.py = this.y;
+        this.x += vx; this.y += vy;
+      }
+      constrain() {
+        const m = 20;
+        if (this.x < m) this.x = m; if (this.x > W - m) this.x = W - m;
+        if (this.y < m) this.y = m; if (this.y > H - m) this.y = H - m;
+      }
+      pin() { this.pinned = true; }
+      unpin() { this.pinned = false; }
+    }
+
+    class Stick {
+      constructor(p1, p2) {
+        this.p1 = p1; this.p2 = p2;
+        this.length = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      }
+      update() {
+        const dx = this.p2.x - this.p1.x, dy = this.p2.y - this.p1.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist === 0) return;
+        const percent = (this.length - dist) / dist / 2;
+        const ox = dx * percent, oy = dy * percent;
+        if (!this.p1.pinned) { this.p1.x -= ox; this.p1.y -= oy; }
+        if (!this.p2.pinned) { this.p2.x += ox; this.p2.y += oy; }
+      }
+    }
+
+    const points = [], sticks = [];
+    const style = randomSeed % 4;
+    let x = 100 + rng() * (W - 200);
+    let y = 100 + rng() * (H - 200);
+    let angle = rng() * Math.PI * 2;
+    points.push(new Point(x, y));
+
+    if (style === 0) {
+      const numLoops = 3 + Math.floor(rng() * 3);
+      for (let loop = 0; loop < numLoops; loop++) {
+        const lcx = 100 + rng() * (W - 200), lcy = 100 + rng() * (H - 200);
+        const r = 80 + rng() * 100, dir = rng() > 0.5 ? 1 : -1;
+        for (let j = 0; j < 50; j++) {
+          const a = (j / 50) * Math.PI * 2 * dir;
+          points.push(new Point(clamp(lcx + Math.cos(a) * r, 20, W - 20), clamp(lcy + Math.sin(a) * r, 20, H - 20)));
+        }
+      }
+    } else if (style === 1) {
+      const numLoops = 5 + Math.floor(rng() * 4);
+      for (let loop = 0; loop < numLoops; loop++) {
+        const lcx = 120 + rng() * (W - 240), lcy = 120 + rng() * (H - 240);
+        const r = 30 + rng() * 50, dir = rng() > 0.5 ? 1 : -1;
+        const last = points[points.length - 1];
+        for (let s = 1; s <= 8; s++) {
+          const t = s / 8;
+          points.push(new Point(clamp(last.x + (lcx - last.x) * t, 20, W - 20), clamp(last.y + (lcy - last.y) * t, 20, H - 20)));
+        }
+        for (let j = 0; j < 35; j++) {
+          const a = (j / 35) * Math.PI * 2 * dir;
+          points.push(new Point(clamp(lcx + Math.cos(a) * r, 20, W - 20), clamp(lcy + Math.sin(a) * r, 20, H - 20)));
+        }
+      }
+    } else if (style === 2) {
+      const rows = 5 + Math.floor(rng() * 3);
+      const rowH = (H - 160) / rows;
+      let px = 60 + rng() * 100, py = 80 + rng() * 80;
+      points.push(new Point(px, py));
+      for (let row = 0; row < rows; row++) {
+        const tx = row % 2 === 0 ? W - 60 - rng() * 80 : 60 + rng() * 80;
+        const ty = py + rowH;
+        const segs = 25 + Math.floor(rng() * 15);
+        for (let s = 1; s <= segs; s++) {
+          const t = s / segs;
+          points.push(new Point(
+            clamp(px + (tx - px) * t + (rng() - 0.5) * 30, 20, W - 20),
+            clamp(py + (ty - py) * t + (rng() - 0.5) * 20, 20, H - 20)
+          ));
+        }
+        px = tx; py = ty;
+      }
+    } else {
+      const steps = 120 + Math.floor(rng() * 60);
+      for (let i = 0; i < steps; i++) {
+        if (rng() < 0.05) { x = 60 + rng() * (W - 120); y = 60 + rng() * (H - 120); }
+        angle += (rng() - 0.5) * 0.8;
+        const step = 10 + rng() * 15;
+        x = clamp(x + Math.cos(angle) * step, 20, W - 20);
+        y = clamp(y + Math.sin(angle) * step, 20, H - 20);
+        points.push(new Point(x, y));
+      }
+    }
+
+    for (let i = 0; i < points.length - 1; i++) sticks.push(new Stick(points[i], points[i + 1]));
+
+    // ── Input ──
+    let draggedPoint = null, mouseX = 0, mouseY = 0, offX = 0, offY = 0;
+
+    function getPos(e) {
+      const r = canvas.getBoundingClientRect();
+      const scaleX = W / r.width, scaleY = H / r.height;
+      if (e.touches) return { x: (e.touches[0].clientX - r.left) * scaleX, y: (e.touches[0].clientY - r.top) * scaleY };
+      return { x: (e.clientX - r.left) * scaleX, y: (e.clientY - r.top) * scaleY };
+    }
+
+    function onDown(e) {
+      const pos = getPos(e); mouseX = pos.x; mouseY = pos.y;
+      for (const ep of [points[0], points[points.length - 1]]) {
+        if (Math.hypot(ep.x - mouseX, ep.y - mouseY) < 22) {
+          draggedPoint = ep; offX = ep.x - mouseX; offY = ep.y - mouseY; ep.pin(); return;
+        }
+      }
+      let bestDist = 18, bestPoint = null, bestOffX = 0, bestOffY = 0;
+      for (const stick of sticks) {
+        const A = mouseX - stick.p1.x, B = mouseY - stick.p1.y;
+        const C = stick.p2.x - stick.p1.x, D = stick.p2.y - stick.p1.y;
+        const lenSq = C * C + D * D;
+        if (lenSq === 0) continue;
+        const param = Math.max(0, Math.min(1, (A * C + B * D) / lenSq));
+        const xx = stick.p1.x + param * C, yy = stick.p1.y + param * D;
+        const dist = Math.hypot(mouseX - xx, mouseY - yy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPoint = param <= 0.5 ? stick.p1 : stick.p2;
+          bestOffX = bestPoint.x - mouseX; bestOffY = bestPoint.y - mouseY;
+        }
+      }
+      if (bestPoint) { draggedPoint = bestPoint; offX = bestOffX; offY = bestOffY; draggedPoint.pin(); }
+    }
+
+    function onMove(e) {
+      const pos = getPos(e); mouseX = pos.x; mouseY = pos.y;
+      if (draggedPoint) {
+        draggedPoint.x = mouseX + offX; draggedPoint.y = mouseY + offY;
+        draggedPoint.px = draggedPoint.x; draggedPoint.py = draggedPoint.y;
+      }
+    }
+
+    function onUp() { if (draggedPoint) draggedPoint.unpin(); draggedPoint = null; }
+
+    canvas.addEventListener('mousedown', onDown);
+    canvas.addEventListener('mousemove', onMove);
+    canvas.addEventListener('mouseup', onUp);
+    canvas.addEventListener('mouseleave', onUp);
+    canvas.addEventListener('touchstart', onDown, { passive: true });
+    canvas.addEventListener('touchmove', onMove, { passive: true });
+    canvas.addEventListener('touchend', onUp);
+
+    // ── Intersections ──
+    function intersects(p1, p2, p3, p4) {
+      const d = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y);
+      if (d === 0) return false;
+      const ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / d;
+      const ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / d;
+      return ua > 0 && ua < 1 && ub > 0 && ub < 1;
+    }
+
+    function hasTangles() {
+      for (let i = 0; i < sticks.length; i++)
+        for (let j = i + 2; j < sticks.length; j++)
+          if (intersects(sticks[i].p1, sticks[i].p2, sticks[j].p1, sticks[j].p2)) return true;
+      return false;
+    }
+
+    // ── Draw ──
+    function draw() {
+      ctx.strokeStyle = '#3366bb'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 0; i < points.length - 1; i++) {
+        const p0 = points[Math.max(0, i - 1)], p1 = points[i];
+        const p2 = points[i + 1], p3 = points[Math.min(points.length - 1, i + 2)];
+        const t = 0.85;
+        ctx.bezierCurveTo(
+          p1.x + (p2.x - p0.x) / 6 * t, p1.y + (p2.y - p0.y) / 6 * t,
+          p2.x - (p3.x - p1.x) / 6 * t, p2.y - (p3.y - p1.y) / 6 * t,
+          p2.x, p2.y
+        );
+      }
+      ctx.stroke();
+      function drawBall(x, y) {
+        ctx.fillStyle = '#3366bb'; ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#5588cc'; ctx.beginPath(); ctx.arc(x - 3, y - 3, 10, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.arc(x - 4, y - 4, 4, 0, Math.PI * 2); ctx.fill();
+      }
+      drawBall(points[0].x, points[0].y);
+      drawBall(points[points.length - 1].x, points[points.length - 1].y);
+    }
+
+    let wonState = false;
+    function animate() {
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < 3; i++) for (const s of sticks) s.update();
+      for (const p of points) { p.update(); p.constrain(); }
+      draw();
+      const tangled = hasTangles();
+      if (!tangled && !wonState) {
+        isWon = true; gamePaused = true; pauseBtn.textContent = 'resume';
+        footerEl.textContent = "yay! you've untangled the wires! click restart for another 👆";
+      }
+      wonState = !tangled;
+      animFrame = requestAnimationFrame(animate);
+    }
+
+    animate();
+  }
+
+  startTimer();
+  initGame(seed);
+</script>
+</body>
+</html>
